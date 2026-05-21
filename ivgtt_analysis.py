@@ -9,135 +9,175 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from matplotlib.patches import Patch
 from scipy import stats
+import openpyxl
+import glob
+import re
 import os
+
+# ── Excel data loading ──────────────────────────────────────────────────────
+RAWDATA_DIR = r"C:\AI\projects\IVGTT\Rawdata"
+
+def find_data_file():
+    """Return the path to the first .xlsx/.xlsm file in Rawdata/."""
+    candidates = []
+    for ext in ("*.xlsx", "*.xlsm"):
+        candidates.extend(glob.glob(os.path.join(RAWDATA_DIR, ext)))
+    candidates = list(set(p for p in candidates if not os.path.basename(p).startswith("~$")))
+    if not candidates:
+        raise FileNotFoundError(f"No .xlsx or .xlsm file found in {RAWDATA_DIR}")
+    if len(candidates) > 1:
+        print(f"  Warning: Multiple Excel files found, using: {os.path.basename(candidates[0])}")
+    return candidates[0]
+
+
+def clean_group_name(raw_name):
+    """Convert raw Excel group names like '1\\nVehicle' → 'Vehicle'."""
+    if not raw_name:
+        return "Unknown"
+    cleaned = re.sub(r"^\d+\s*\n\s*", "", raw_name)
+    cleaned = re.sub(r"\s*\n\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _read_8_timepoints(ws, row_idx, start_col):
+    """Read 8 contiguous numeric values starting at (row_idx, start_col)."""
+    values = []
+    for col_offset in range(8):
+        val = ws.cell(row=row_idx, column=start_col + col_offset).value
+        if val is None:
+            raise ValueError(
+                f"Missing value at row={row_idx}, col={start_col + col_offset}"
+            )
+        values.append(float(val))
+    return values
+
+
+def _find_data_rows(ws):
+    """Find the contiguous block of animal data rows in the IVGTT sheet.
+    Returns (start_row, end_row) as 1-indexed openpyxl row numbers."""
+    start = None
+    for row in range(5, ws.max_row + 1):
+        id_val = ws.cell(row=row, column=2).value
+        if id_val is not None and str(id_val).strip():
+            start = row
+            break
+    if start is None:
+        raise ValueError("Could not find data start row in IVGTT sheet.")
+    end = start
+    for row in range(start + 1, ws.max_row + 1):
+        id_val = ws.cell(row=row, column=2).value
+        if id_val is None or str(id_val).strip() == "":
+            break
+        end = row
+    return start, end
+
+
+def parse_ivgtt_sheet(filepath):
+    """Parse the IVGTT sheet from the given Excel file.
+    Returns (raw_data, baseline_date_str, treatment_date_str, study_id).
+    """
+    wb = openpyxl.load_workbook(filepath, data_only=True)
+    if "IVGTT" not in wb.sheetnames:
+        raise ValueError(f"Sheet 'IVGTT' not found in {filepath}. Available: {wb.sheetnames}")
+    ws = wb["IVGTT"]
+
+    # Extract dates from row 3 header cells (1-indexed)
+    baseline_date = None
+    treatment_date = None
+    for col in [4, 14]:  # baseline glucose (D) and insulin (N) headers
+        header = str(ws.cell(row=3, column=col).value or "")
+        m = re.search(r"Conducted on (\d{4}/\d{2}/\d{2})", header)
+        if m:
+            day_m = re.search(r"Study Day ([-\d]+)", header)
+            day_str = f" (Day {day_m.group(1)})" if day_m else ""
+            baseline_date = f"{m.group(1)}{day_str}"
+            break
+    for col in [23, 33]:  # treatment glucose (W) and insulin (AG) headers
+        header = str(ws.cell(row=3, column=col).value or "")
+        m = re.search(r"Conducted on (\d{4}/\d{2}/\d{2})", header)
+        if m:
+            day_m = re.search(r"Study Day ([-\d]+)", header)
+            day_str = f" (Day {day_m.group(1)})" if day_m else ""
+            treatment_date = f"{m.group(1)}{day_str}"
+            break
+    if not baseline_date:
+        print("  Warning: Could not extract baseline date from headers")
+        baseline_date = "Unknown"
+    if not treatment_date:
+        print("  Warning: Could not extract treatment date from headers")
+        treatment_date = "Unknown"
+
+    # Extract study ID from filename
+    basename = os.path.splitext(os.path.basename(filepath))[0]
+    study_id = basename.split("-")[0] if "-" in basename else basename
+
+    # Find data rows
+    data_start, data_end = _find_data_rows(ws)
+
+    # Parse animal data
+    raw_data = []
+    current_group_raw = None
+
+    # Column map (1-indexed openpyxl):
+    # 1=Group, 2=Animal ID, 3=Cage, 4-11=Baseline Glu, 14-21=Baseline Ins,
+    # 23-30=Treatment Glu, 33-40=Treatment Ins
+    for row_idx in range(data_start, data_end + 1):
+        group_cell = ws.cell(row=row_idx, column=1).value
+        if group_cell is not None and str(group_cell).strip():
+            current_group_raw = str(group_cell).strip()
+        group_display = clean_group_name(current_group_raw)
+
+        animal_id = str(ws.cell(row=row_idx, column=2).value or "").strip()
+        if not animal_id:
+            continue
+        cage = str(ws.cell(row=row_idx, column=3).value or "").strip()
+
+        glu_base = _read_8_timepoints(ws, row_idx, start_col=4)
+        ins_base = _read_8_timepoints(ws, row_idx, start_col=14)
+        glu_treat = _read_8_timepoints(ws, row_idx, start_col=23)
+        ins_treat = _read_8_timepoints(ws, row_idx, start_col=33)
+
+        raw_data.append({
+            "group": group_display,
+            "id": animal_id,
+            "cage": cage,
+            "glu_base": glu_base,
+            "ins_base": ins_base,
+            "glu_treat": glu_treat,
+            "ins_treat": ins_treat,
+        })
+
+    wb.close()
+    return raw_data, baseline_date, treatment_date, study_id
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 OUTPUT_DIR = r"C:\AI\projects\IVGTT"
-STUDY_ID = "KBI202601003"
-BASELINE_DATE = "2026/02/11 (Day -14)"
-TREATMENT_DATE = "2026/04/08 (Day 43)"
 TIME_POINTS = [0, 1, 3, 5, 10, 20, 40, 60]  # minutes
 
-# ── Raw data extracted from IVGTT sheet (rows 5-22, 1-indexed) ─────────────
-# Each animal: [group, animal_id, cage, glu_base[8], ins_base[8], glu_treat[8], ins_treat[8]]
-# Group labels cleaned up for display
+# These will be set dynamically in main() from the Excel file
+STUDY_ID = None
+BASELINE_DATE = None
+TREATMENT_DATE = None
 
-GROUPS_DISPLAY = {
-    "1\nVehicle": "Vehicle",
-    "2\nSema": "Sema",
-    "3\nJKL-010": "JKL-010",
-    "4 \nJKL-010\n+\nSema": "JKL-010+Sema",
-}
-
-raw_data = [
-    # Group 1: Vehicle (rows 5-7)
-    {"group": "Vehicle", "id": "170509", "cage": "207-01",
-     "glu_base":   [74, 386, 311, 290, 244, 164, 89, 53],
-     "ins_base":   [73.64, 193.1, 156.1, 194.2, 324.7, 320, 93.59, 62.68],
-     "glu_treat":  [71, 377, 295, 264, 234, 173, 81, 54],
-     "ins_treat":  [70.98, 312.6, 291.2, 314.3, 499.1, 474.6, 181.1, 100.1]},
-    {"group": "Vehicle", "id": "110427", "cage": "207-02",
-     "glu_base":   [92, 423, 396, 339, 281, 206, 138, 89],
-     "ins_base":   [369.2, 340.9, 453.8, 437.6, 465, 517.6, 521.8, 294.5],
-     "glu_treat":  [81, 415, 348, 301, 264, 205, 125, 80],
-     "ins_treat":  [180.9, 227, 408.5, 311.5, 455.4, 488.8, 391.2, 404]},
-    {"group": "Vehicle", "id": "180455", "cage": "207-05",
-     "glu_base":   [78, 399, 338, 309, 256, 190, 94, 51],
-     "ins_base":   [47.1, 165, 120.6, 113.5, 162.7, 182.3, 134, 35.52],
-     "glu_treat":  [73, 449, 330, 311, 251, 193, 94, 89],
-     "ins_treat":  [23.57, 122.4, 97.02, 71.67, 108.2, 122.2, 78.53, 41.28]},
-
-    # Group 2: Sema (rows 8-12)
-    {"group": "Sema", "id": "182101", "cage": "204-03",
-     "glu_base":   [79, 408, 343, 311, 262, 189, 99, 61],
-     "ins_base":   [68.86, 260.7, 278.2, 283.3, 456.8, 437.9, 190.5, 65.65],
-     "glu_treat":  [74, 381, 338, 299, 258, 169, 73, 40],
-     "ins_treat":  [50.28, 230.3, 291.3, 346.8, 596.1, 770.5, 216, 63.66]},
-    {"group": "Sema", "id": "184155", "cage": "204-07",
-     "glu_base":   [74, 408, 357, 322, 274, 225, 131, 71],
-     "ins_base":   [57.48, 269.8, 246.3, 231.7, 309.6, 357.5, 359.9, 103.3],
-     "glu_treat":  [65, 419, 328, 298, 257, 188, 89, 40],
-     "ins_treat":  [22.57, 189, 224.4, 200.3, 342.6, 463.3, 246.1, 55.28]},
-    {"group": "Sema", "id": "130437", "cage": "207-10",
-     "glu_base":   [71, 482, 323, 297, 252, 176, 60, 19],
-     "ins_base":   [19.8, 258.4, 302.4, 286.5, 545.2, 756, 152, 61.14],
-     "glu_treat":  [71, 489, 334, 290, 240, 132, 46, 14],
-     "ins_treat":  [35.66, 639.5, 624.1, 636.5, 958.1, 1235, 264.6, 93.39]},
-    {"group": "Sema", "id": "150643", "cage": "207-12",
-     "glu_base":   [72, 390, 341, 296, 261, 204, 125, 82],
-     "ins_base":   [38.33, 126.9, 157.7, 131.5, 173.8, 126.3, 128.1, 59.59],
-     "glu_treat":  [65, 411, 329, 286, 228, 153, 58, 49],
-     "ins_treat":  [22.72, 180.2, 215.1, 193.6, 232.6, 255.2, 41.89, 28.67]},
-    {"group": "Sema", "id": "200059", "cage": "207-15",
-     "glu_base":   [59, 374, 334, 295, 266, 209, 138, 99],
-     "ins_base":   [38.19, 179.4, 127.6, 102.8, 154.2, 165.3, 125.1, 67.88],
-     "glu_treat":  [57, 406, 320, 286, 247, 175, 92, 48],
-     "ins_treat":  [34.55, 242.6, 204.8, 157.3, 233.1, 304.5, 148.8, 42.39]},
-
-    # Group 3: JKL-010 (rows 13-17)
-    {"group": "JKL-010", "id": "112107", "cage": "204-02",
-     "glu_base":   [59, 417, 308, 264, 213, 153, 68, 48],
-     "ins_base":   [43.97, 333.7, 284.4, 232, 378.7, 374.1, 96.94, 46.46],
-     "glu_treat":  [61, 480, 373, 321, 263, 195, 110, 67],
-     "ins_treat":  [86.91, 137.6, 275.2, 185.1, 305.8, 305, 254.3, 66.89]},
-    {"group": "JKL-010", "id": "184219", "cage": "204-08",
-     "glu_base":   [76, 342, 340, 298, 255, 209, 124, 86],
-     "ins_base":   [36.11, 152.6, 127.5, 121.5, 146.6, 120.7, 126.3, 68.72],
-     "glu_treat":  [67, 376, 332, 280, 246, 191, 112, 69],
-     "ins_treat":  [38.02, 152.5, 126.9, 109.5, 151.9, 152, 106.4, 56.29]},
-    {"group": "JKL-010", "id": "110079", "cage": "207-03",
-     "glu_base":   [85, 421, 335, 302, 269, 214, 152, 107],
-     "ins_base":   [53.05, 92.08, 180.4, 137.3, 197.8, 140.6, 107.3, 80.64],
-     "glu_treat":  [73, 492, 351, 306, 274, 222, 159, 106],
-     "ins_treat":  [35.34, 32.94, 117.9, 78.47, 97.91, 89.13, 61.17, 62.85]},
-    {"group": "JKL-010", "id": "180043", "cage": "207-04",
-     "glu_base":   [88, 392, 316, 305, 255, 179, 78, 54],
-     "ins_base":   [75.52, 158.8, 318.6, 334, 468, 426.9, 85.97, 50.92],
-     "glu_treat":  [70, 302, 274, 256, 224, 150, 63, 55],
-     "ins_treat":  [37.1, 152.6, 159.4, 145.1, 257.2, 207.6, 32.51, 24.06]},
-    {"group": "JKL-010", "id": "150201", "cage": "207-11",
-     "glu_base":   [74, 476, 391, 345, 307, 252, 170, 109],
-     "ins_base":   [77.77, 335.5, 379.9, 326.5, 532.9, 799.9, 782.4, 481.4],
-     "glu_treat":  [78, 456, 394, 354, 313, 249, 156, 97],
-     "ins_treat":  [95.79, 373.7, 421.9, 320.7, 491.4, 595.8, 503.7, 270.9]},
-
-    # Group 4: JKL-010+Sema (rows 18-22)
-    {"group": "JKL-010+Sema", "id": "182015", "cage": "204-04",
-     "glu_base":   [66, 373, 300, 266, 249, 188, 98, 58],
-     "ins_base":   [24.11, 41, 109.4, 79.07, 224.1, 212.6, 77.15, 41.38],
-     "glu_treat":  [55, 340, 279, 254, 221, 147, 54, 26],
-     "ins_treat":  [14.95, 166.4, 123.1, 120, 239, 325.3, 54.22, 21.09]},
-    {"group": "JKL-010+Sema", "id": "140257", "cage": "207-06",
-     "glu_base":   [64, 376, 323, 270, 242, 193, 122, 81],
-     "ins_base":   [117.1, 532, 902.8, 697.8, 612.2, 636.4, 444.3, 392.9],
-     "glu_treat":  [61, 453, 344, 316, 253, 155, 69, 35],
-     "ins_treat":  [84.88, 671.6, 1203, 992.2, 1242, 1362, 342.7, 117.4]},
-    {"group": "JKL-010+Sema", "id": "170331", "cage": "207-07",
-     "glu_base":   [69, 427, 339, 310, 269, 212, 133, 84],
-     "ins_base":   [61.63, 239.8, 245.3, 201.4, 300.9, 263.5, 167.3, 72.35],
-     "glu_treat":  [73, 392, 303, 270, 230, 174, 87, 65],
-     "ins_treat":  [43.92, 122, 172, 153.5, 178.3, 168.6, 76.41, 33.07]},
-    {"group": "JKL-010+Sema", "id": "180103", "cage": "207-08",
-     "glu_base":   [69, 422, 339, 311, 261, 178, 77, 79],
-     "ins_base":   [18.44, 162.3, 147.6, 114.7, 193.1, 165.6, 26.77, 50.44],
-     "glu_treat":  [58, 319, 250, 226, 222, 126, 56, 60],
-     "ins_treat":  [11.11, 74.34, 114, 99.7, 139.1, 125.1, 13.55, 6.09]},
-    {"group": "JKL-010+Sema", "id": "200109", "cage": "207-16",
-     "glu_base":   [71, 424, 368, 337, 304, 248, 150, 80],
-     "ins_base":   [32.71, 202.2, 151.3, 121.4, 162.6, 213.9, 279.2, 91.94],
-     "glu_treat":  [74, 448, 390, 352, 293, 216, 92, 41],
-     "ins_treat":  [80.33, 225.7, 311.9, 232.9, 367.6, 497, 245.8, 67.89]},
-]
-
-GROUP_ORDER = ["Vehicle", "Sema", "JKL-010", "JKL-010+Sema"]
+# ── Group colors ────────────────────────────────────────────────────────────
 GROUP_COLORS = {
     "Vehicle": "#377eb8",
     "Sema": "#ff7f00",
     "JKL-010": "#4daf4a",
     "JKL-010+Sema": "#984ea3",
 }
+DEFAULT_COLORS = ["#377eb8", "#ff7f00", "#4daf4a", "#984ea3",
+                  "#a65628", "#f781bf", "#999999", "#e41a1c"]
 BASELINE_COLOR = "#888888"
 TREATMENT_COLOR = "#e41a1c"
+
+# GROUP_ORDER and raw_data will be set dynamically in main()
+GROUP_ORDER = []
+raw_data = []
+groups_data = {}
+STAT_RESULTS = {}
 
 # ── Calculations ───────────────────────────────────────────────────────────
 def calc_auc(values):
@@ -152,20 +192,21 @@ def calc_kg(glu_values):
     """Kg = (Glu_10min - Glu_40min) / (30 * Glu_10min)"""
     return (glu_values[4] - glu_values[6]) / (30 * glu_values[4])
 
-# Compute derived metrics for each animal
-for d in raw_data:
-    d["glu_auc_base"] = calc_auc(d["glu_base"])
-    d["kg_base"] = calc_kg(d["glu_base"])
-    d["ins_auc_base"] = calc_auc(d["ins_base"])
-    d["glu_auc_treat"] = calc_auc(d["glu_treat"])
-    d["kg_treat"] = calc_kg(d["glu_treat"])
-    d["ins_auc_treat"] = calc_auc(d["ins_treat"])
-    # % changes
-    d["pct_t0"] = (d["glu_treat"][0] - d["glu_base"][0]) / d["glu_base"][0] * 100
-    d["pct_t60"] = (d["glu_treat"][7] - d["glu_base"][7]) / d["glu_base"][7] * 100
-    d["pct_glu_auc"] = (d["glu_auc_treat"] - d["glu_auc_base"]) / d["glu_auc_base"] * 100
-    d["pct_kg"] = (d["kg_treat"] - d["kg_base"]) / d["kg_base"] * 100
-    d["pct_ins_auc"] = (d["ins_auc_treat"] - d["ins_auc_base"]) / d["ins_auc_base"] * 100
+def compute_derived_metrics(data_list):
+    """Compute AUC, Kg, and % change for each animal in data_list (in place)."""
+    for d in data_list:
+        d["glu_auc_base"] = calc_auc(d["glu_base"])
+        d["kg_base"] = calc_kg(d["glu_base"])
+        d["ins_auc_base"] = calc_auc(d["ins_base"])
+        d["glu_auc_treat"] = calc_auc(d["glu_treat"])
+        d["kg_treat"] = calc_kg(d["glu_treat"])
+        d["ins_auc_treat"] = calc_auc(d["ins_treat"])
+        d["pct_t0"] = (d["glu_treat"][0] - d["glu_base"][0]) / d["glu_base"][0] * 100
+        d["pct_t60"] = (d["glu_treat"][7] - d["glu_base"][7]) / d["glu_base"][7] * 100
+        d["pct_glu_auc"] = (d["glu_auc_treat"] - d["glu_auc_base"]) / d["glu_auc_base"] * 100
+        d["pct_kg"] = (d["kg_treat"] - d["kg_base"]) / d["kg_base"] * 100
+        d["pct_ins_auc"] = (d["ins_auc_treat"] - d["ins_auc_base"]) / d["ins_auc_base"] * 100
+
 
 # Group-level summaries
 def group_summary(data_list, key):
@@ -177,14 +218,18 @@ def group_summary(data_list, key):
         "n": len(vals),
     }
 
-groups_data = {}
-for g in GROUP_ORDER:
-    members = [d for d in raw_data if d["group"] == g]
-    groups_data[g] = {"members": members, "n": len(members)}
-    for metric in ["glu_auc_base", "kg_base", "ins_auc_base",
-                   "glu_auc_treat", "kg_treat", "ins_auc_treat",
-                   "pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
-        groups_data[g][metric] = group_summary(members, metric)
+
+def build_groups_data(data_list, group_order):
+    """Build the groups_data dict for all groups."""
+    gd = {}
+    for g in group_order:
+        members = [d for d in data_list if d["group"] == g]
+        gd[g] = {"members": members, "n": len(members)}
+        for metric in ["glu_auc_base", "kg_base", "ins_auc_base",
+                       "glu_auc_treat", "kg_treat", "ins_auc_treat",
+                       "pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
+            gd[g][metric] = group_summary(members, metric)
+    return gd
 
 # ── Plotting helpers ──────────────────────────────────────────────────────
 plt.rcParams.update({
@@ -292,18 +337,18 @@ def compute_stats():
     return results
 
 
-# Compute all statistics once
-STAT_RESULTS = compute_stats()
-
-# Inject % Change vs 0 p-values into groups_data for easy access
-for g in GROUP_ORDER:
-    for key in ["pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
-        groups_data[g][f"{key}_pval"] = STAT_RESULTS[g][f"{key}_1s"]["p"]
-
-# Inject between-group % change p-values into groups_data
-for g in ["Sema", "JKL-010", "JKL-010+Sema"]:
-    for key in ["pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
-        groups_data[g][f"{key}_pval_vv"] = STAT_RESULTS[g][f"{key}_vv"]["p"]
+def compute_and_inject_stats(groups_data, GROUP_ORDER):
+    """Compute all statistics and inject p-values into groups_data.
+    Returns STAT_RESULTS dict."""
+    STAT_RESULTS = compute_stats()
+    for g in GROUP_ORDER:
+        for key in ["pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
+            groups_data[g][f"{key}_pval"] = STAT_RESULTS[g][f"{key}_1s"]["p"]
+    for g in ["Sema", "JKL-010", "JKL-010+Sema"]:
+        if g in GROUP_ORDER:
+            for key in ["pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
+                groups_data[g][f"{key}_pval_vv"] = STAT_RESULTS[g][f"{key}_vv"]["p"]
+    return STAT_RESULTS
 
 # ── Figure 1: Glucose time curves (4 panels: Baseline + Treatment per group) ──
 def plot_glucose_curves():
@@ -825,9 +870,35 @@ def generate_report():
 # ── Main ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print(f"IVGTT Analysis — {STUDY_ID}")
+
+    # Load data from Excel file in Rawdata/
+    filepath = find_data_file()
+    print(f"IVGTT Analysis")
+    print(f"Reading: {os.path.basename(filepath)}")
+    raw_data, BASELINE_DATE, TREATMENT_DATE, STUDY_ID = parse_ivgtt_sheet(filepath)
+
+    # Derive GROUP_ORDER from parsed data (first-appearance order)
+    GROUP_ORDER = []
+    for d in raw_data:
+        if d["group"] not in GROUP_ORDER:
+            GROUP_ORDER.append(d["group"])
+
+    # Extend GROUP_COLORS for any groups not already mapped
+    for i, g in enumerate(GROUP_ORDER):
+        if g not in GROUP_COLORS:
+            GROUP_COLORS[g] = DEFAULT_COLORS[i % len(DEFAULT_COLORS)]
+
     print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Study: {STUDY_ID}")
+    print(f"Groups: {', '.join(GROUP_ORDER)} ({len(raw_data)} animals)")
+    print(f"Baseline: {BASELINE_DATE}")
+    print(f"Treatment: {TREATMENT_DATE}")
     print()
+
+    # Compute derived metrics
+    compute_derived_metrics(raw_data)
+    groups_data = build_groups_data(raw_data, GROUP_ORDER)
+    STAT_RESULTS = compute_and_inject_stats(groups_data, GROUP_ORDER)
 
     print("Generating figures...")
     plot_glucose_curves()
@@ -869,6 +940,8 @@ if __name__ == "__main__":
     print("\n" + "-" * 60)
     print("BETWEEN-GROUP (Treatment vs Vehicle):")
     for g in ["Sema", "JKL-010", "JKL-010+Sema"]:
+        if g not in GROUP_ORDER:
+            continue
         ga_p = STAT_RESULTS[g]["glu_auc_vv"]["p"]
         kg_p = STAT_RESULTS[g]["kg_vv"]["p"]
         ia_p = STAT_RESULTS[g]["ins_auc_vv"]["p"]
