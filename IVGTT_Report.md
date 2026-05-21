@@ -91,7 +91,7 @@
 - fig2_insulin_curves.png — Insulin time curves (baseline & treatment per group)
 - fig3_glucose_overlay.png — Baseline vs Treatment glucose overlay
 - fig4_insulin_overlay.png — Baseline vs Treatment insulin overlay
-- fig5_auc_kg_bars.png — AUC and Kg bar charts with B vs T significance
+- fig5_auc_kg_bars.png — AUC and Kg % change bar charts with vs-0 & between-group significance
 - fig6_pct_change.png — % Change summary with vs-0 significance
 - fig7_spaghetti_glucose.png — Individual glucose curves per group
 - fig8_spaghetti_insulin.png — Individual insulin curves per group

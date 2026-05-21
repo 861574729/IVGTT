@@ -280,6 +280,15 @@ def compute_stats():
             t_stat, p_val = stats.ttest_1samp(pct_vals, 0)
             results[g][f"{pct_key}_1s"] = {"p": p_val, "label": f"{g} %Change {label}"}
 
+    # Between-group: % Change vs Vehicle % Change (unpaired t-test)
+    for g in ["Sema", "JKL-010", "JKL-010+Sema"]:
+        members = groups_data[g]["members"]
+        for pct_key in ["pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
+            veh_vals = [d[pct_key] for d in vehicle_members]
+            grp_vals = [d[pct_key] for d in members]
+            t_stat, p_val = stats.ttest_ind(grp_vals, veh_vals, equal_var=False)
+            results[g][f"{pct_key}_vv"] = {"p": p_val, "label": f"{g} vs Veh %Change {pct_key}"}
+
     return results
 
 
@@ -290,6 +299,11 @@ STAT_RESULTS = compute_stats()
 for g in GROUP_ORDER:
     for key in ["pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
         groups_data[g][f"{key}_pval"] = STAT_RESULTS[g][f"{key}_1s"]["p"]
+
+# Inject between-group % change p-values into groups_data
+for g in ["Sema", "JKL-010", "JKL-010+Sema"]:
+    for key in ["pct_t0", "pct_t60", "pct_glu_auc", "pct_kg", "pct_ins_auc"]:
+        groups_data[g][f"{key}_pval_vv"] = STAT_RESULTS[g][f"{key}_vv"]["p"]
 
 # ── Figure 1: Glucose time curves (4 panels: Baseline + Treatment per group) ──
 def plot_glucose_curves():
@@ -433,98 +447,87 @@ def plot_insulin_overlay():
 
 # ── Figure 5: AUC & Kg bar charts with significance ───────────────────────
 def plot_auc_kg_bars():
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    metrics = [
-        ("glu_auc", "Glucose AUC (mg/dL·min)"),
-        ("ins_auc", "Insulin AUC (μU/mL·min)"),
-        ("kg", "Kg (glucose clearance rate)"),
-    ]
-    bar_width = 0.30
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
+    metric_labels = {
+        "glu_auc": "Glucose AUC",
+        "ins_auc": "Insulin AUC",
+        "kg": "Kg",
+    }
+    metric_keys = ["glu_auc", "ins_auc", "kg"]
+    bar_width = 0.45
     x = np.arange(len(GROUP_ORDER))
 
-    for col, (key, ylabel) in enumerate(metrics):
-        ax1 = axes[0, col]
-        ax2 = axes[1, col]
-
-        base_key = f"{key}_base"
-        treat_key = f"{key}_treat"
-
-        base_means = np.array([groups_data[g][base_key]["mean"] for g in GROUP_ORDER])
-        base_sems = np.array([groups_data[g][base_key]["sem"] for g in GROUP_ORDER])
-        treat_means = np.array([groups_data[g][treat_key]["mean"] for g in GROUP_ORDER])
-        treat_sems = np.array([groups_data[g][treat_key]["sem"] for g in GROUP_ORDER])
-
-        colors_base = [GROUP_COLORS[g] for g in GROUP_ORDER]
-
-        # ─── Absolute values (row 0) ───
-        bars1 = ax1.bar(x - bar_width/2, base_means, bar_width,
-                        yerr=base_sems, capsize=4, color=BASELINE_COLOR,
-                        alpha=0.8, label="Baseline", edgecolor="white")
-        bars2 = ax1.bar(x + bar_width/2, treat_means, bar_width,
-                        yerr=treat_sems, capsize=4, color=TREATMENT_COLOR,
-                        alpha=0.8, label="Treatment", edgecolor="white")
-
-        # Significance: Baseline vs Treatment (within-group)
-        max_vals = np.maximum(base_means + base_sems, treat_means + treat_sems)
-        y_range = ax1.get_ylim()[1] - ax1.get_ylim()[0]
-        h_step = y_range * 0.06
-        y_offset = max_vals + (y_range * 0.03)
-
-        for i, g in enumerate(GROUP_ORDER):
-            p_val = STAT_RESULTS[g][f"{key}_bt"]["p"]
-            stars = pvalue_stars(p_val)
-            if stars == "ns":
-                continue
-            bracket_y = y_offset[i] + h_step
-            ax1.plot([x[i] - bar_width/2, x[i] - bar_width/2,
-                      x[i] + bar_width/2, x[i] + bar_width/2],
-                     [bracket_y, bracket_y + h_step * 0.4,
-                      bracket_y + h_step * 0.4, bracket_y],
-                     lw=1.0, color="black", clip_on=False)
-            ax1.text(x[i], bracket_y + h_step * 0.5, stars,
-                     ha="center", va="bottom", fontsize=8, fontweight="bold")
-
-        # Align y-axis max after annotation
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(GROUP_ORDER, fontsize=8)
-        ax1.set_ylabel(ylabel)
-        ax1.set_title(f"{ylabel} — Absolute Values  (* B vs T)", fontsize=10)
-        ax1.legend(fontsize=7, loc="upper left")
-
-        # ─── % Change (row 1) ───
+    for col, key in enumerate(metric_keys):
+        ax = axes[col]
         pct_key = f"pct_{key}"
         pct_means = np.array([groups_data[g][pct_key]["mean"] for g in GROUP_ORDER])
         pct_sems = np.array([groups_data[g][pct_key]["sem"] for g in GROUP_ORDER])
 
         bar_colors = [GROUP_COLORS[g] for g in GROUP_ORDER]
-        bars3 = ax2.bar(x, pct_means, bar_width * 2, yerr=pct_sems, capsize=4,
-                        color=bar_colors, alpha=0.85, edgecolor="white")
-        ax2.axhline(y=0, color="black", linewidth=0.8)
+        ax.bar(x, pct_means, bar_width, yerr=pct_sems, capsize=6,
+               color=bar_colors, alpha=0.85, edgecolor="white", linewidth=0.8)
+        ax.axhline(y=0, color="black", linewidth=0.8)
 
-        # Significance: % Change vs 0 (one-sample t-test)
-        y_range2 = max(abs(np.min(pct_means - pct_sems)),
-                       abs(np.max(pct_means + pct_sems)))
-        h_step2 = y_range2 * 0.06
+        data_max = np.max(pct_means + pct_sems)
+        data_min = np.min(pct_means - pct_sems)
+        y_span = max(abs(data_max), abs(data_min)) * 2 + 0.01
+        y_buffer = y_span * 0.06
+        tracked_max = data_max
+        tracked_min = data_min
 
+        # Vs-0 significance stars
         for i, g in enumerate(GROUP_ORDER):
-            p_val = STAT_RESULTS[g][f"{pct_key}_1s"]["p"]
+            p_val = groups_data[g][f"{pct_key}_pval"]
             stars = pvalue_stars(p_val)
             if stars == "ns":
                 continue
-            sign_val = 1 if pct_means[i] > 0 else -1
-            y_pos = pct_means[i] + sign_val * (pct_sems[i] + h_step2 * 2)
-            ax2.text(x[i], y_pos + sign_val * h_step2, stars,
-                     ha="center", va="bottom" if sign_val > 0 else "top",
-                     fontsize=8, fontweight="bold")
+            sign = 1 if pct_means[i] > 0 else -1
+            y_pos = pct_means[i] + sign * (pct_sems[i] + y_buffer * 1.5)
+            ax.text(x[i], y_pos, stars, ha="center",
+                    va="bottom" if sign > 0 else "top",
+                    fontsize=8, fontweight="bold")
+            if y_pos > 0:
+                tracked_max = max(tracked_max, y_pos + y_buffer)
+            else:
+                tracked_min = min(tracked_min, y_pos - y_buffer)
 
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(GROUP_ORDER, fontsize=8)
-        ax2.set_ylabel("% Change from Baseline  (±SEM)")
-        ax2.set_title(f"{ylabel} — % Change  (* vs 0)", fontsize=10)
+        # Between-group significance brackets (vs Vehicle on % change)
+        bracket_level = 0
+        for i, g in enumerate(GROUP_ORDER):
+            if g == "Vehicle":
+                continue
+            p_val = groups_data[g].get(f"{pct_key}_pval_vv", 1.0)
+            stars = pvalue_stars(p_val)
+            if stars == "ns":
+                continue
+            top_y = max(pct_means[0] + pct_sems[0],
+                       pct_means[i] + pct_sems[i])
+            h = y_buffer * (4 + bracket_level * 1.8)
+            bracket_y = top_y + h
+            ax.plot([x[0], x[0], x[i], x[i]],
+                    [bracket_y, bracket_y + y_buffer * 0.3,
+                     bracket_y + y_buffer * 0.3, bracket_y],
+                    lw=1.0, color="gray", clip_on=False)
+            ax.text((x[0] + x[i]) / 2, bracket_y + y_buffer * 0.35,
+                    stars, ha="center", va="bottom",
+                    fontsize=7, fontweight="bold", color="gray")
+            tracked_max = max(tracked_max, bracket_y + y_buffer * 0.8)
+            bracket_level += 1
 
-    fig.suptitle(f"{STUDY_ID}: IVGTT AUC and Kg — Baseline vs Treatment\nSignificance: * p<0.05, ** p<0.01, *** p<0.001",
-                 fontsize=12, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+        # Auto-adjust ylim to include all annotations
+        margin = y_span * 0.12
+        ax.set_ylim(tracked_min - margin, tracked_max + margin)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(GROUP_ORDER, fontsize=8)
+        ax.set_ylabel(f"{metric_labels[key]} % Change from Baseline  (±SEM)")
+        ax.set_title(f"{metric_labels[key]} — % Change", fontsize=10)
+
+    fig.suptitle(
+        f"{STUDY_ID}: IVGTT AUC and Kg — % Change from Baseline\n"
+        "* p<0.05, ** p<0.01, *** p<0.001 vs 0 (black) | vs Vehicle (gray brackets)",
+        fontsize=11, fontweight="bold")
+    fig.tight_layout(rect=[0, 0.02, 1, 0.91])
     save_fig(fig, "fig5_auc_kg_bars.png")
 
 # ── Figure 6: % Change summary with significance ───────────────────────────
@@ -535,6 +538,9 @@ def plot_pct_change():
     bar_width = 0.18
     x = np.arange(len(pct_metrics))
 
+    tracked_max = 0
+    tracked_min = 0
+
     for i, g in enumerate(GROUP_ORDER):
         means = [groups_data[g][m]["mean"] for m in pct_metrics]
         sems = [groups_data[g][m]["sem"] for m in pct_metrics]
@@ -542,7 +548,20 @@ def plot_pct_change():
         ax.bar(x + offset, means, bar_width, yerr=sems, capsize=3,
                color=GROUP_COLORS[g], alpha=0.85, label=g, edgecolor="white")
 
-        # Significance vs 0 for each bar
+        for j, m in enumerate(pct_metrics):
+            val = means[j]
+            tracked_max = max(tracked_max, val + sems[j])
+            tracked_min = min(tracked_min, val - sems[j])
+
+    # Now place stars, tracking extremes
+    y_span = max(abs(tracked_max), abs(tracked_min)) * 2 + 0.01
+    y_buffer = y_span * 0.05
+
+    for i, g in enumerate(GROUP_ORDER):
+        means = [groups_data[g][m]["mean"] for m in pct_metrics]
+        sems = [groups_data[g][m]["sem"] for m in pct_metrics]
+        offset = (i - 1.5) * bar_width
+
         for j, m in enumerate(pct_metrics):
             p_val = groups_data[g][f"{m}_pval"]
             stars = pvalue_stars(p_val)
@@ -551,16 +570,25 @@ def plot_pct_change():
             x_pos = x[j] + offset
             val = means[j]
             sem = sems[j]
-            y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
             sign = 1 if val > 0 else -1
-            y_pos = val + sign * (sem + y_range * 0.04)
-            ax.text(x_pos, y_pos, stars, ha="center", va="bottom" if sign > 0 else "top",
+            y_pos = val + sign * (sem + y_buffer * 1.5)
+            ax.text(x_pos, y_pos, stars, ha="center",
+                    va="bottom" if sign > 0 else "top",
                     fontsize=6, fontweight="bold")
+            if y_pos > 0:
+                tracked_max = max(tracked_max, y_pos + y_buffer)
+            else:
+                tracked_min = min(tracked_min, y_pos - y_buffer)
 
     ax.axhline(y=0, color="black", linewidth=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels(pct_labels, fontsize=9)
     ax.set_ylabel("% Change from Baseline  (±SEM)")
+
+    # Auto-adjust ylim so stars stay inside
+    margin = y_span * 0.15
+    ax.set_ylim(tracked_min - margin, tracked_max + margin)
+
     ax.set_title(f"{STUDY_ID}: % Change in IVGTT Parameters (Treatment vs Baseline)\n* p<0.05, ** p<0.01, *** p<0.001 vs 0",
                  fontweight="bold", fontsize=11)
     ax.legend(fontsize=9, ncol=4, loc="upper left")
@@ -781,7 +809,7 @@ def generate_report():
         "fig2_insulin_curves.png — Insulin time curves (baseline & treatment per group)",
         "fig3_glucose_overlay.png — Baseline vs Treatment glucose overlay",
         "fig4_insulin_overlay.png — Baseline vs Treatment insulin overlay",
-        "fig5_auc_kg_bars.png — AUC and Kg bar charts with B vs T significance",
+        "fig5_auc_kg_bars.png — AUC and Kg % change bar charts with vs-0 & between-group significance",
         "fig6_pct_change.png — % Change summary with vs-0 significance",
         "fig7_spaghetti_glucose.png — Individual glucose curves per group",
         "fig8_spaghetti_insulin.png — Individual insulin curves per group",
