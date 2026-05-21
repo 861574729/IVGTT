@@ -1,0 +1,8 @@
+# Ignore Excel data files — drop your study .xlsx/.xlsm here for analysis
+*.xlsx
+*.xlsm
+*.XLSX
+*.XLSM
+~$*
+# Keep this directory
+!.gitkeep
